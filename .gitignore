@@ -1,0 +1,22 @@
+# Data
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# IDE / tools
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
