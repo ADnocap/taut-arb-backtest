@@ -29,7 +29,11 @@ CREATE TABLE IF NOT EXISTS polymarket_price_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     condition_id TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
-    yes_price REAL NOT NULL,
+    yes_price REAL,
+    no_price REAL,
+    volume REAL,
+    trade_count INTEGER,
+    source TEXT NOT NULL DEFAULT 'clob',
     UNIQUE(condition_id, timestamp)
 );
 
@@ -158,6 +162,17 @@ class Database:
         await self.close()
 
     async def _init_schema(self):
+        # Migrate polymarket_price_history if it lacks the 'source' column
+        cur = await self._db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='polymarket_price_history'"
+        )
+        if await cur.fetchone():
+            cur2 = await self._db.execute("PRAGMA table_info(polymarket_price_history)")
+            cols = {row[1] for row in await cur2.fetchall()}
+            if "source" not in cols:
+                await self._db.execute("DROP TABLE polymarket_price_history")
+                await self._db.commit()
+
         await self._db.executescript(DDL)
         await self._db.executescript(INDEXES)
         await self._db.commit()
@@ -185,10 +200,25 @@ class Database:
             return
         await self._db.executemany(
             """INSERT OR IGNORE INTO polymarket_price_history
-               (condition_id, timestamp, yes_price)
-               VALUES (:condition_id, :timestamp, :yes_price)""",
+               (condition_id, timestamp, yes_price, no_price, volume, trade_count, source)
+               VALUES (:condition_id, :timestamp, :yes_price, :no_price,
+                       :volume, :trade_count, :source)""",
             rows,
         )
+        await self._db.commit()
+
+    async def clear_price_history(self, asset: str | None = None):
+        """Delete price history rows. If asset given, only for that asset's markets."""
+        if asset:
+            await self._db.execute(
+                """DELETE FROM polymarket_price_history
+                   WHERE condition_id IN (
+                       SELECT condition_id FROM polymarket_markets WHERE asset = ?
+                   )""",
+                (asset,),
+            )
+        else:
+            await self._db.execute("DELETE FROM polymarket_price_history")
         await self._db.commit()
 
     async def insert_option_trades(self, rows: list[dict]):

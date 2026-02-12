@@ -2,7 +2,7 @@
 
 `backtest_sample.db` is a self-contained SQLite database built from raw data collected across 6 APIs. It contains everything needed to backtest crypto prediction market arbitrage strategies for BTC, ETH, SOL, and XRP.
 
-**Size:** ~2.5 GB | **Coverage:** 2025-04-04 to 2026-02-12 | **Format:** SQLite 3 (WAL mode)
+**Size:** ~1.5 GB | **Coverage:** 2025-04-04 to 2026-02-12 | **Format:** SQLite 3 (WAL mode)
 
 ## How It Was Created
 
@@ -75,7 +75,7 @@ Each row is a settled Polymarket prediction market about a crypto price event. M
 
 ---
 
-### 2. `market_prices` — 4,767,403 rows
+### 2. `market_prices` — 1,053,736 rows
 
 Time series of YES/NO prices for each market. Sourced from Polymarket CLOB price history (primary) with Goldsky GraphQL backfill for gaps.
 
@@ -83,13 +83,16 @@ Time series of YES/NO prices for each market. Sourced from Polymarket CLOB price
 |--------|------|-------------|
 | `condition_id` | TEXT FK | References `markets.condition_id` |
 | `timestamp` | INTEGER | Unix timestamp in **seconds** |
-| `yes_price` | REAL | YES token price (0.0 to 1.0) |
-| `no_price` | REAL | NO token price (= 1.0 - yes_price) |
+| `yes_price` | REAL | YES token price, 0.0 to 1.0 (nullable) |
+| `no_price` | REAL | Independent NO token price, 0.0 to 1.0 (nullable) |
+| `volume` | REAL | Trade volume in the bucket |
+| `trade_count` | INTEGER | Number of trades in the bucket |
+| `source` | TEXT | Data source: `clob` or `goldsky` |
 
 **Unique constraint:** `(condition_id, timestamp)`
 **Index:** `idx_mp` on `(condition_id, timestamp)`
 
-**Rows per asset:** BTC: 1,245,717 | ETH: 1,240,094 | SOL: 1,181,321 | XRP: 1,100,271
+**Rows per asset:** BTC: 444,517 | ETH: 296,619 | SOL: 178,616 | XRP: 133,984
 **Date range:** 2025-04-04 to 2026-02-11
 
 **Important:** Timestamps are in **seconds** (not milliseconds), unlike the other tables.
@@ -433,7 +436,8 @@ df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
 
 # Load market prices
 prices = pd.read_sql_query("""
-    SELECT mp.condition_id, mp.timestamp, mp.yes_price, m.asset, m.direction
+    SELECT mp.condition_id, mp.timestamp, mp.yes_price, mp.no_price,
+           mp.volume, mp.source, m.asset, m.direction
     FROM market_prices mp
     JOIN markets m ON mp.condition_id = m.condition_id
 """, conn)
@@ -459,5 +463,5 @@ The build script generates 11 diagnostic charts in `sample/`:
 | `iv_smile_example.png` | IV vs strike for one well-populated BTC snapshot |
 | `asset_prices.png` | 2x2 grid of asset price histories from OHLCV |
 | `funding_rates.png` | Funding rate time series for all 4 assets |
-| `market_price_examples.png` | 6 example market price trajectories |
+| `market_price_examples.png` | 6 example market price trajectories (YES and NO lines) |
 | `data_summary.png` | Table image of row counts and date ranges |

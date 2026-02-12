@@ -41,8 +41,11 @@ CREATE TABLE IF NOT EXISTS markets (
 CREATE TABLE IF NOT EXISTS market_prices (
     condition_id TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
-    yes_price REAL NOT NULL,
-    no_price REAL NOT NULL,
+    yes_price REAL,
+    no_price REAL,
+    volume REAL,
+    trade_count INTEGER,
+    source TEXT,
     UNIQUE(condition_id, timestamp),
     FOREIGN KEY (condition_id) REFERENCES markets(condition_id)
 );
@@ -211,18 +214,21 @@ def build_prices(src: sqlite3.Connection, dst: sqlite3.Connection) -> int:
 
     # Stream from source
     cursor = src.execute(
-        "SELECT condition_id, timestamp, yes_price FROM polymarket_price_history ORDER BY condition_id"
+        """SELECT condition_id, timestamp, yes_price, no_price,
+                  volume, trade_count, source
+           FROM polymarket_price_history ORDER BY condition_id"""
     )
     for row in cursor:
         cid = row["condition_id"]
         if cid not in cids:
             continue
-        yes_p = row["yes_price"]
-        no_p = round(1.0 - yes_p, 4)
-        batch.append((cid, row["timestamp"], yes_p, no_p))
+        batch.append((
+            cid, row["timestamp"], row["yes_price"], row["no_price"],
+            row["volume"], row["trade_count"], row["source"],
+        ))
         if len(batch) >= BATCH_SIZE:
             dst.executemany(
-                "INSERT OR IGNORE INTO market_prices VALUES (?,?,?,?)",
+                "INSERT OR IGNORE INTO market_prices VALUES (?,?,?,?,?,?,?)",
                 batch,
             )
             total += len(batch)
@@ -230,7 +236,7 @@ def build_prices(src: sqlite3.Connection, dst: sqlite3.Connection) -> int:
 
     if batch:
         dst.executemany(
-            "INSERT OR IGNORE INTO market_prices VALUES (?,?,?,?)",
+            "INSERT OR IGNORE INTO market_prices VALUES (?,?,?,?,?,?,?)",
             batch,
         )
         total += len(batch)
@@ -822,12 +828,19 @@ def build_charts(dst: sqlite3.Connection):
         for idx, (cid, question, asset, _) in enumerate(examples):
             ax = axes[idx // 3][idx % 3]
             rows = dst.execute(
-                "SELECT timestamp, yes_price FROM market_prices WHERE condition_id=? ORDER BY timestamp",
+                "SELECT timestamp, yes_price, no_price FROM market_prices WHERE condition_id=? ORDER BY timestamp",
                 (cid,),
             ).fetchall()
-            times = [_dt.datetime.fromtimestamp(r[0], tz=_dt.timezone.utc) for r in rows]
-            prices = [r[1] for r in rows]
-            ax.plot(times, prices, linewidth=0.8, color="#e76f51")
+            yes_pts = [(r[0], r[1]) for r in rows if r[1] is not None]
+            no_pts = [(r[0], r[2]) for r in rows if r[2] is not None]
+            if yes_pts:
+                ax.plot([_dt.datetime.fromtimestamp(t, tz=_dt.timezone.utc) for t, _ in yes_pts],
+                        [p for _, p in yes_pts], linewidth=0.8, color="#e76f51", label="YES")
+            if no_pts:
+                ax.plot([_dt.datetime.fromtimestamp(t, tz=_dt.timezone.utc) for t, _ in no_pts],
+                        [p for _, p in no_pts], linewidth=0.8, color="#2a9d8f", label="NO")
+            if idx == 0:
+                ax.legend(fontsize=6)
             # Truncate question for title
             short_q = (question[:50] + "...") if question and len(question) > 50 else (question or "")
             ax.set_title(f"{asset}: {short_q}", fontsize=8)

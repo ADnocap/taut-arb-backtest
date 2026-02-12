@@ -28,8 +28,13 @@ STEPS = {
 }
 
 
-async def run_pipeline(assets: list[str], step: int | None = None):
+async def run_pipeline(assets: list[str], step: int | None = None, clear_prices: bool = False):
     async with Database() as db:
+        if clear_prices:
+            for asset in assets:
+                await db.clear_price_history(asset)
+                console.print(f"  Cleared price history for {asset}")
+
         steps_to_run = [step] if step else list(STEPS.keys())
 
         for s in steps_to_run:
@@ -44,9 +49,9 @@ async def run_pipeline(assets: list[str], step: int | None = None):
                 async with PolymarketPricesCollector() as collector:
                     for asset in assets:
                         stats = await collector.collect(db, asset)
-                        console.print(f"  {asset}: CLOB={stats['clob_success']}, "
-                                      f"Goldsky={stats['goldsky_backfilled']}, "
-                                      f"empty={stats['no_data']}")
+                        console.print(f"  {asset}: Goldsky={stats['goldsky_success']}, "
+                                      f"CLOB fallback={stats['clob_fallback']}, "
+                                      f"no data={stats['no_data']}")
 
             elif s == 3:
                 async with DeribitOptionsCollector() as collector:
@@ -93,6 +98,11 @@ def main():
         choices=list(STEPS.keys()),
         help="Run a single step (for debugging)",
     )
+    parser.add_argument(
+        "--clear-prices",
+        action="store_true",
+        help="Clear price history before step 2 re-collection",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -102,7 +112,7 @@ def main():
     )
 
     console.print(f"[bold green]Starting pipeline for assets: {args.assets}")
-    asyncio.run(run_pipeline(args.assets, args.step))
+    asyncio.run(run_pipeline(args.assets, args.step, args.clear_prices))
     console.print("[bold green]Done!")
 
 

@@ -44,6 +44,75 @@ async def print_report(db: Database):
             )
     console.print(t)
 
+    # 2b. Price history source breakdown
+    t = Table(title="Price History Source Breakdown")
+    t.add_column("Asset", style="cyan")
+    t.add_column("Goldsky Rows", justify="right", style="green")
+    t.add_column("CLOB Rows", justify="right", style="yellow")
+    t.add_column("Avg Volume (USDC)", justify="right")
+    t.add_column("Avg Trades/Bucket", justify="right")
+    t.add_column("Avg Spread", justify="right")
+
+    for asset in ["BTC", "ETH", "SOL", "XRP"]:
+        # Goldsky rows
+        cur = await db._db.execute(
+            """SELECT COUNT(*) FROM polymarket_price_history ph
+               JOIN polymarket_markets pm ON ph.condition_id = pm.condition_id
+               WHERE pm.asset = ? AND ph.source = 'goldsky'""",
+            (asset,),
+        )
+        goldsky_rows = (await cur.fetchone())[0]
+
+        # CLOB rows
+        cur = await db._db.execute(
+            """SELECT COUNT(*) FROM polymarket_price_history ph
+               JOIN polymarket_markets pm ON ph.condition_id = pm.condition_id
+               WHERE pm.asset = ? AND ph.source = 'clob'""",
+            (asset,),
+        )
+        clob_rows = (await cur.fetchone())[0]
+
+        if goldsky_rows + clob_rows == 0:
+            continue
+
+        # Avg volume (where volume is not null)
+        cur = await db._db.execute(
+            """SELECT AVG(ph.volume) FROM polymarket_price_history ph
+               JOIN polymarket_markets pm ON ph.condition_id = pm.condition_id
+               WHERE pm.asset = ? AND ph.volume IS NOT NULL""",
+            (asset,),
+        )
+        avg_vol = (await cur.fetchone())[0]
+
+        # Avg trade count
+        cur = await db._db.execute(
+            """SELECT AVG(ph.trade_count) FROM polymarket_price_history ph
+               JOIN polymarket_markets pm ON ph.condition_id = pm.condition_id
+               WHERE pm.asset = ? AND ph.trade_count IS NOT NULL""",
+            (asset,),
+        )
+        avg_trades = (await cur.fetchone())[0]
+
+        # Avg spread (yes_price + no_price - 1.0) where both non-null
+        cur = await db._db.execute(
+            """SELECT AVG(ph.yes_price + ph.no_price - 1.0)
+               FROM polymarket_price_history ph
+               JOIN polymarket_markets pm ON ph.condition_id = pm.condition_id
+               WHERE pm.asset = ? AND ph.yes_price IS NOT NULL AND ph.no_price IS NOT NULL""",
+            (asset,),
+        )
+        avg_spread = (await cur.fetchone())[0]
+
+        t.add_row(
+            asset,
+            f"{goldsky_rows:,}",
+            f"{clob_rows:,}",
+            f"${avg_vol:,.2f}" if avg_vol else "N/A",
+            f"{avg_trades:.1f}" if avg_trades else "N/A",
+            f"{avg_spread:.4f}" if avg_spread is not None else "N/A",
+        )
+    console.print(t)
+
     # 3. Deribit data ranges
     deribit_tables = [
         ("deribit_option_trades", "Options"),

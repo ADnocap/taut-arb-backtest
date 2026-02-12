@@ -8,7 +8,7 @@ Polymarket lists thousands of prediction markets on crypto price events ("Will B
 
 **Assets:** BTC, ETH, SOL, XRP
 **Coverage:** April 2025 – February 2026
-**Markets:** 30,180 settled prediction markets with 4.8M price observations
+**Markets:** 30,180 settled prediction markets with 1.1M price observations
 
 ## Architecture
 
@@ -53,7 +53,7 @@ Pre-collected databases covering April 2025 – February 2026 are available as a
 | File | Contents | Raw Size | Download |
 |------|----------|----------|----------|
 | `backtest_data.db.gz` | Raw trade-level data (9 tables, ~12M rows) | 2.4 GB | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v1.0-data/backtest_data.db.gz) |
-| `backtest_sample.db.gz` | Hourly snapshots for backtesting (6 tables) | 2.5 GB | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v1.0-data/backtest_sample.db.gz) |
+| `backtest_sample.db.gz` | Hourly snapshots for backtesting (6 tables) | 1.5 GB | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v1.0-data/backtest_sample.db.gz) |
 
 To decompress:
 

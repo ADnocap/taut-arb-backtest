@@ -1,4 +1,4 @@
-"""Polymarket price history: CLOB primary + Goldsky subgraph backfill."""
+"""Polymarket price history: Goldsky primary + CLOB fallback."""
 
 import asyncio
 import logging
@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 
 
 class PolymarketPricesCollector(BaseCollector):
-    """Two-phase price collection: CLOB then Goldsky backfill."""
+    """Two-phase price collection: Goldsky primary, CLOB fallback."""
 
     def __init__(self):
         super().__init__(concurrency=POLYMARKET_SEMAPHORE)
@@ -30,125 +30,45 @@ class PolymarketPricesCollector(BaseCollector):
     async def collect(self, db: Database, asset: str) -> dict:
         """Collect prices for all markets of an asset.
 
-        Returns stats dict with clob_success, clob_empty, goldsky_backfilled, no_data.
+        Returns stats dict with goldsky_success, clob_fallback, no_data.
         """
         markets = await db.get_all_markets(asset)
         if not markets:
             log.warning("No markets found for %s", asset)
-            return {"clob_success": 0, "clob_empty": 0, "goldsky_backfilled": 0, "no_data": 0}
+            return {"goldsky_success": 0, "clob_fallback": 0, "no_data": 0}
 
-        log.info("Phase 1: CLOB price history for %d %s markets", len(markets), asset)
-        clob_results = await self._phase_clob(db, markets)
-
-        # Phase 2: Goldsky backfill for markets with empty CLOB
-        missing = await db.get_markets_missing_prices(asset)
-        eligible = [
-            m for m in missing
-            if self._is_goldsky_eligible(m)
-        ]
+        # Phase 1: Goldsky for eligible markets (real trades with volume)
+        eligible = [m for m in markets if self._is_goldsky_eligible(m)]
         log.info(
-            "Phase 2: Goldsky backfill for %d/%d missing markets (eligible)",
-            len(eligible), len(missing),
+            "Phase 1: Goldsky for %d/%d %s markets (eligible)",
+            len(eligible), len(markets), asset,
         )
         goldsky_count = 0
         if eligible:
             goldsky_count = await self._phase_goldsky(db, eligible)
 
+        # Phase 2: CLOB fallback for markets still missing prices
+        missing = await db.get_markets_missing_prices(asset)
+        log.info(
+            "Phase 2: CLOB fallback for %d missing %s markets",
+            len(missing), asset,
+        )
+        clob_count = 0
+        if missing:
+            clob_results = await self._phase_clob(db, missing)
+            clob_count = clob_results["success"]
+
+        # Recount missing after both phases
+        still_missing = await db.get_markets_missing_prices(asset)
         stats = {
-            "clob_success": clob_results["success"],
-            "clob_empty": clob_results["empty"],
-            "goldsky_backfilled": goldsky_count,
-            "no_data": len(missing) - goldsky_count,
+            "goldsky_success": goldsky_count,
+            "clob_fallback": clob_count,
+            "no_data": len(still_missing),
         }
         log.info("Price collection stats: %s", stats)
         return stats
 
-    # ---- Phase 1: CLOB ----
-
-    async def _phase_clob(self, db: Database, markets: list[dict]) -> dict:
-        sem = asyncio.Semaphore(5)
-        success = 0
-        empty = 0
-        total = len(markets)
-
-        async def fetch_one(mkt):
-            nonlocal success, empty
-            token_id = mkt.get("yes_token_id")
-            if not token_id:
-                return
-
-            settlement = mkt.get("settlement_date")
-            if settlement:
-                try:
-                    end_dt = datetime.fromisoformat(settlement)
-                except (ValueError, TypeError):
-                    end_dt = datetime.now(timezone.utc)
-            else:
-                end_dt = datetime.now(timezone.utc)
-
-            start_dt = end_dt - timedelta(days=PRICE_LOOKBACK_DAYS)
-            start_ts = int(start_dt.timestamp())
-            end_ts = int(end_dt.timestamp())
-
-            params = {
-                "market": token_id,
-                "startTs": start_ts,
-                "endTs": end_ts,
-                "fidelity": PRICE_FIDELITY_MINUTES,
-            }
-
-            async with sem:
-                data = await self._get(
-                    f"{CLOB_BASE_URL}/prices-history", params=params
-                )
-
-            if not data:
-                empty += 1
-                done = success + empty
-                if done % 200 == 0:
-                    log.info("CLOB progress: %d/%d done (%d success, %d empty)", done, total, success, empty)
-                return
-
-            history = data.get("history", [])
-            if not history:
-                empty += 1
-                done = success + empty
-                if done % 200 == 0:
-                    log.info("CLOB progress: %d/%d done (%d success, %d empty)", done, total, success, empty)
-                return
-
-            rows = []
-            for pt in history:
-                ts = pt.get("t")
-                price = pt.get("p")
-                if ts is not None and price is not None:
-                    rows.append({
-                        "condition_id": mkt["condition_id"],
-                        "timestamp": int(ts),
-                        "yes_price": float(price),
-                    })
-
-            if rows:
-                await db.insert_price_history(rows)
-                success += 1
-            else:
-                empty += 1
-
-            done = success + empty
-            if done % 200 == 0:
-                log.info("CLOB progress: %d/%d done (%d success, %d empty)", done, total, success, empty)
-
-        tasks = [fetch_one(m) for m in markets]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        errors = [r for r in results if isinstance(r, Exception)]
-        if errors:
-            log.warning("CLOB phase: %d tasks raised exceptions", len(errors))
-            for exc in errors[:3]:
-                log.warning("  %s: %s", type(exc).__name__, exc)
-        log.info("CLOB phase done: %d success, %d empty, %d errors", success, empty, len(errors))
-        return {"success": success, "empty": empty}
-
-    # ---- Phase 2: Goldsky ----
+    # ---- Phase 1: Goldsky (primary) ----
 
     def _is_goldsky_eligible(self, market: dict) -> bool:
         """Check if market settlement is after Goldsky data availability."""
@@ -198,24 +118,48 @@ class PolymarketPricesCollector(BaseCollector):
                     log.info("Goldsky progress: %d/%d done (%d backfilled)", done, total, backfilled)
                 return
 
-            # Calculate prices and bucket into 30-min intervals
-            buckets: dict[int, float] = {}
+            # Dual-token VWAP bucketing into 30-min intervals
+            buckets: dict[int, dict] = {}
             for fill in fills:
-                price = self._calc_fill_price(fill, yes_token)
-                if price is None:
+                result = self._calc_fill_price_and_volume(fill, yes_token, no_token)
+                if result is None:
                     continue
+                side, price, usdc_vol = result
                 ts = int(fill["timestamp"])
                 bucket = (ts // 1800) * 1800
-                buckets[bucket] = price  # last price wins
 
-            rows = [
-                {
+                if bucket not in buckets:
+                    buckets[bucket] = {
+                        "yes_pv": 0.0, "yes_vol": 0.0, "yes_n": 0,
+                        "no_pv": 0.0, "no_vol": 0.0, "no_n": 0,
+                    }
+
+                b = buckets[bucket]
+                if side == "yes":
+                    b["yes_pv"] += price * usdc_vol
+                    b["yes_vol"] += usdc_vol
+                    b["yes_n"] += 1
+                else:
+                    b["no_pv"] += price * usdc_vol
+                    b["no_vol"] += usdc_vol
+                    b["no_n"] += 1
+
+            rows = []
+            for ts in sorted(buckets):
+                b = buckets[ts]
+                yes_price = round(b["yes_pv"] / b["yes_vol"], 6) if b["yes_vol"] > 0 else None
+                no_price = round(b["no_pv"] / b["no_vol"], 6) if b["no_vol"] > 0 else None
+                volume = round(b["yes_vol"] + b["no_vol"], 2)
+                trade_count = b["yes_n"] + b["no_n"]
+                rows.append({
                     "condition_id": mkt["condition_id"],
                     "timestamp": ts,
-                    "yes_price": price,
-                }
-                for ts, price in sorted(buckets.items())
-            ]
+                    "yes_price": yes_price,
+                    "no_price": no_price,
+                    "volume": volume if volume > 0 else None,
+                    "trade_count": trade_count if trade_count > 0 else None,
+                    "source": "goldsky",
+                })
 
             if rows:
                 await db.insert_price_history(rows)
@@ -319,8 +263,13 @@ class PolymarketPricesCollector(BaseCollector):
             f'] }}'
         )
 
-    def _calc_fill_price(self, fill: dict, yes_token_id: str) -> float | None:
-        """Calculate yes_price from a Goldsky fill event."""
+    def _calc_fill_price_and_volume(
+        self, fill: dict, yes_token_id: str, no_token_id: str
+    ) -> tuple[str, float, float] | None:
+        """Calculate price and USDC volume from a Goldsky fill event.
+
+        Returns ("yes"|"no", price, usdc_volume) or None if unparseable.
+        """
         maker_asset = fill.get("makerAssetId", "")
         taker_asset = fill.get("takerAssetId", "")
 
@@ -333,15 +282,116 @@ class PolymarketPricesCollector(BaseCollector):
         if maker_amount <= 0 or taker_amount <= 0:
             return None
 
-        price = None
+        # Identify which token and which side (maker sells token / taker buys token)
+        for token_id, side in [(yes_token_id, "yes"), (no_token_id, "no")]:
+            if not token_id:
+                continue
 
-        # Maker sells tokens for USDC
-        if maker_asset == yes_token_id and taker_asset == USDC_ASSET_ID:
-            price = (taker_amount / 1e6) / (maker_amount / 1e6)
-        # Taker buys tokens with USDC
-        elif taker_asset == yes_token_id and maker_asset == USDC_ASSET_ID:
-            price = (maker_amount / 1e6) / (taker_amount / 1e6)
+            # Maker sells tokens for USDC
+            if maker_asset == token_id and taker_asset == USDC_ASSET_ID:
+                price = (taker_amount / 1e6) / (maker_amount / 1e6)
+                usdc_vol = taker_amount / 1e6
+                if 0 < price < 1.0:
+                    return (side, round(price, 6), round(usdc_vol, 2))
 
-        if price is not None and 0 < price < 1.0:
-            return round(price, 6)
+            # Taker buys tokens with USDC
+            if taker_asset == token_id and maker_asset == USDC_ASSET_ID:
+                price = (maker_amount / 1e6) / (taker_amount / 1e6)
+                usdc_vol = maker_amount / 1e6
+                if 0 < price < 1.0:
+                    return (side, round(price, 6), round(usdc_vol, 2))
+
         return None
+
+    # ---- Phase 2: CLOB (fallback) ----
+
+    async def _phase_clob(self, db: Database, markets: list[dict]) -> dict:
+        sem = asyncio.Semaphore(5)
+        success = 0
+        empty = 0
+        total = len(markets)
+
+        async def fetch_one(mkt):
+            nonlocal success, empty
+            yes_token = mkt.get("yes_token_id")
+            no_token = mkt.get("no_token_id")
+            if not yes_token and not no_token:
+                return
+
+            settlement = mkt.get("settlement_date")
+            if settlement:
+                try:
+                    end_dt = datetime.fromisoformat(settlement)
+                except (ValueError, TypeError):
+                    end_dt = datetime.now(timezone.utc)
+            else:
+                end_dt = datetime.now(timezone.utc)
+
+            start_dt = end_dt - timedelta(days=PRICE_LOOKBACK_DAYS)
+            start_ts = int(start_dt.timestamp())
+            end_ts = int(end_dt.timestamp())
+
+            # Query both YES and NO tokens
+            yes_history = {}
+            no_history = {}
+
+            for token_id, target in [(yes_token, yes_history), (no_token, no_history)]:
+                if not token_id:
+                    continue
+                params = {
+                    "market": token_id,
+                    "startTs": start_ts,
+                    "endTs": end_ts,
+                    "fidelity": PRICE_FIDELITY_MINUTES,
+                }
+                async with sem:
+                    data = await self._get(
+                        f"{CLOB_BASE_URL}/prices-history", params=params
+                    )
+                if data:
+                    for pt in data.get("history", []):
+                        ts = pt.get("t")
+                        price = pt.get("p")
+                        if ts is not None and price is not None:
+                            target[int(ts)] = float(price)
+
+            if not yes_history and not no_history:
+                empty += 1
+                done = success + empty
+                if done % 200 == 0:
+                    log.info("CLOB progress: %d/%d done (%d success, %d empty)", done, total, success, empty)
+                return
+
+            # Merge YES and NO by timestamp
+            all_ts = sorted(set(yes_history) | set(no_history))
+            rows = []
+            for ts in all_ts:
+                rows.append({
+                    "condition_id": mkt["condition_id"],
+                    "timestamp": ts,
+                    "yes_price": yes_history.get(ts),
+                    "no_price": no_history.get(ts),
+                    "volume": None,
+                    "trade_count": None,
+                    "source": "clob",
+                })
+
+            if rows:
+                await db.insert_price_history(rows)
+                success += 1
+            else:
+                empty += 1
+
+            done = success + empty
+            if done % 200 == 0:
+                log.info("CLOB progress: %d/%d done (%d success, %d empty)", done, total, success, empty)
+
+        tasks = [fetch_one(m) for m in markets]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        errors = [r for r in results if isinstance(r, Exception)]
+        if errors:
+            log.warning("CLOB phase: %d tasks raised exceptions", len(errors))
+            for exc in errors[:3]:
+                log.warning("  %s: %s", type(exc).__name__, exc)
+        log.info("CLOB phase done: %d success, %d empty, %d errors", success, empty, len(errors))
+        return {"success": success, "empty": empty}
