@@ -46,6 +46,22 @@ Polymarket lists thousands of prediction markets on crypto price events ("Will B
 
 No API keys required — all endpoints are public.
 
+## Dataset
+
+Pre-collected databases covering April 2025 – February 2026 are available as a [GitHub Release](https://github.com/ADnocap/taut-arb-backtest/releases/tag/v1.0-data):
+
+| File | Contents | Raw Size | Download |
+|------|----------|----------|----------|
+| `backtest_data.db.gz` | Raw trade-level data (9 tables, ~12M rows) | 2.4 GB | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v1.0-data/backtest_data.db.gz) |
+| `backtest_sample.db.gz` | Hourly snapshots for backtesting (6 tables) | 2.5 GB | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v1.0-data/backtest_sample.db.gz) |
+
+To decompress:
+
+```bash
+gunzip backtest_data.db.gz                  # → backtest_data.db (project root)
+gunzip backtest_sample.db.gz                # → move to sample/backtest_sample.db
+```
+
 ## Sample Data
 
 The `sample/` directory contains a pre-built SQLite database with hourly snapshots and diagnostic charts. See [`sample/DATA_GUIDE.md`](sample/DATA_GUIDE.md) for full schema documentation and query examples.
