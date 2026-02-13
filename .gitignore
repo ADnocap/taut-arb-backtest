@@ -2,6 +2,7 @@
 *.db
 *.db-wal
 *.db-shm
+*.gz
 
 # Python
 __pycache__/

@@ -1,6 +1,6 @@
 # Sample Database Guide
 
-`backtest_sample.db` is a self-contained SQLite database built from raw data collected across 6 APIs. It contains everything needed to backtest crypto prediction market arbitrage strategies for BTC, ETH, SOL, and XRP.
+`backtest_sample.db` is a self-contained SQLite database built from raw data collected across 6 APIs. It contains nine tables — including DVOL volatility index data and volatility-of-volatility (VoV) — everything needed to backtest crypto prediction market arbitrage strategies for BTC, ETH, SOL, and XRP.
 
 **Size:** ~1.5 GB | **Coverage:** 2025-04-04 to 2026-02-12 | **Format:** SQLite 3 (WAL mode)
 
@@ -14,7 +14,7 @@ The sample database is built by `build_sample.py` from a raw collection database
 | Polymarket Gamma API | Active markets (offset-based pagination) |
 | Goldsky GraphQL subgraph | Price backfill for markets where CLOB returns empty (~30-50% of settled markets) |
 | Deribit History API (`history.deribit.com`) | Options trades with IV, futures trades, OHLCV candles |
-| Deribit Main API (`www.deribit.com`) | Funding rates (not available on history API) |
+| Deribit Main API (`www.deribit.com`) | Funding rates, DVOL volatility index |
 
 The build script transforms raw trade-level data into hourly snapshots using a 24-hour sliding window. For each hour, it takes the most recent trade per instrument within the past 24 hours and emits that as the snapshot. This compresses millions of individual trades into a regular hourly grid suitable for backtesting.
 
@@ -31,13 +31,19 @@ This drops and recreates `sample/backtest_sample.db` from scratch (~2 minutes).
 
 ## Schema Overview
 
-Six tables, organized in three layers:
+Nine tables, organized in four layers:
 
 ```
 Prediction Markets          Derivatives Snapshots         Market Data
 ==================          =====================         ===========
 markets ──< market_prices   options_snapshots              funding_rates
                             futures_snapshots              ohlcv
+
+Volatility
+==========
+dvol_official    (Deribit DVOL index, BTC/ETH)
+dvol_computed    (VIX-style DVOL from options, BTC/ETH/SOL)
+vov              (volatility-of-volatility, daily)
 ```
 
 ---
@@ -204,6 +210,77 @@ Used for Rogers-Satchell realized volatility calculation and general price refer
 
 ---
 
+### 7. `dvol_official` — 15,014 rows
+
+Hourly candles of Deribit's official DVOL volatility index. Available for BTC and ETH only (SOL/XRP not published by Deribit).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `asset` | TEXT | `BTC` or `ETH` |
+| `timestamp` | INTEGER | Hour-start Unix timestamp in **milliseconds** |
+| `open` | REAL | DVOL open, annualized decimal (e.g., 0.58 = 58%) |
+| `high` | REAL | DVOL high |
+| `low` | REAL | DVOL low |
+| `close` | REAL | DVOL close |
+
+**Unique constraint:** `(asset, timestamp)`
+**Index:** `idx_dvol_off` on `(asset, timestamp)`
+
+**Rows per asset:** BTC: 7,302 | ETH: 7,712
+**Date range:** 2025-04-07 to 2026-02-12
+
+---
+
+### 8. `dvol_computed` — 21,530 rows
+
+VIX-style DVOL computed from options snapshots using the Carr-Madan variance swap replication method (Black-76 pricing). Covers BTC, ETH, and SOL; XRP is too sparse to compute reliably.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `asset` | TEXT | `BTC`, `ETH`, or `SOL` |
+| `snapshot_hour` | INTEGER | Hour-floored Unix timestamp in **milliseconds** |
+| `dvol` | REAL | Computed DVOL, annualized decimal (e.g., 0.55 = 55%) |
+| `quality` | TEXT | Computation quality indicator |
+| `near_expiry` | TEXT | Near-term expiry used in interpolation |
+| `far_expiry` | TEXT | Far-term expiry used in interpolation |
+| `n_near_strikes` | INTEGER | Number of OTM strikes in near-term expiry |
+| `n_far_strikes` | INTEGER | Number of OTM strikes in far-term expiry |
+
+**Unique constraint:** `(asset, snapshot_hour)`
+**Index:** `idx_dvol_comp` on `(asset, snapshot_hour)`
+
+**Rows per asset:** BTC: 7,302 | ETH: 7,412 | SOL: 6,816
+**Date range:** 2025-04-07 to 2026-02-12
+
+**Validation:** Computed DVOL correlates well with official Deribit DVOL — BTC r=0.9154, ETH r=0.9539. See `dvol_comparison_btc.png` and `dvol_comparison_eth.png`.
+
+**Requirements:** Each computation requires 3+ OTM strikes per side, 2 expiries bracketing the 30-day target tenor.
+
+---
+
+### 9. `vov` — 925 rows
+
+Daily volatility-of-volatility (VoV) derived from DVOL. Used to scale model parameters based on the current vol regime.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `asset` | TEXT | `BTC`, `ETH`, or `SOL` |
+| `timestamp` | INTEGER | Day-start Unix timestamp in **milliseconds** |
+| `dvol_daily` | REAL | Daily DVOL value (last computed hourly value of the day) |
+| `log_return` | REAL | Log-return of daily DVOL |
+| `vov` | REAL | 30-day rolling std of daily DVOL log-returns, annualized (x sqrt(365)) |
+| `f_vov` | REAL | VoV scaling factor: min((VoV_t / VoV_bar)^0.75, 2.0) |
+
+**Unique constraint:** `(asset, timestamp)`
+**Index:** `idx_vov` on `(asset, timestamp)`
+
+**Rows per asset:** BTC: 306 | ETH: 311 | SOL: 308
+**Date range:** 2025-05-07 to 2026-02-12 (30-day lookback required)
+
+**f_vov** defaults to 1.0 when VoV is unavailable (e.g., XRP, or the first 30 days).
+
+---
+
 ## Timestamp Conventions
 
 | Table | Timestamp column | Unit | Example |
@@ -213,6 +290,9 @@ Used for Rogers-Satchell realized volatility calculation and general price refer
 | `futures_snapshots` | `snapshot_hour` | **Milliseconds** | `1743984000000` |
 | `funding_rates` | `timestamp` | **Milliseconds** | `1743987600000` |
 | `ohlcv` | `timestamp` | **Milliseconds** | `1743984000000` |
+| `dvol_official` | `timestamp` | **Milliseconds** | `1743984000000` |
+| `dvol_computed` | `snapshot_hour` | **Milliseconds** | `1743984000000` |
+| `vov` | `timestamp` | **Milliseconds** | `1743984000000` |
 
 To convert millisecond timestamps to human-readable dates in SQL:
 
@@ -234,7 +314,10 @@ UNION ALL SELECT 'market_prices', COUNT(*) FROM market_prices
 UNION ALL SELECT 'options_snapshots', COUNT(*) FROM options_snapshots
 UNION ALL SELECT 'futures_snapshots', COUNT(*) FROM futures_snapshots
 UNION ALL SELECT 'funding_rates', COUNT(*) FROM funding_rates
-UNION ALL SELECT 'ohlcv', COUNT(*) FROM ohlcv;
+UNION ALL SELECT 'ohlcv', COUNT(*) FROM ohlcv
+UNION ALL SELECT 'dvol_official', COUNT(*) FROM dvol_official
+UNION ALL SELECT 'dvol_computed', COUNT(*) FROM dvol_computed
+UNION ALL SELECT 'vov', COUNT(*) FROM vov;
 ```
 
 ### Market Exploration
@@ -369,6 +452,34 @@ WHERE asset = 'BTC'
 ORDER BY timestamp;
 ```
 
+### DVOL & Volatility-of-Volatility
+
+```sql
+-- Compare official vs computed DVOL for BTC
+SELECT o.timestamp,
+       datetime(o.timestamp / 1000, 'unixepoch') as dt,
+       o.close as official, c.dvol as computed
+FROM dvol_official o
+JOIN dvol_computed c ON c.asset = o.asset AND c.snapshot_hour = o.timestamp
+WHERE o.asset = 'BTC'
+ORDER BY o.timestamp;
+
+-- Daily VoV and scaling factor over time
+SELECT datetime(timestamp / 1000, 'unixepoch') as dt,
+       asset, dvol_daily, vov, f_vov
+FROM vov
+WHERE asset = 'BTC'
+ORDER BY timestamp;
+
+-- Average f_vov by asset (how much vol regime differs from baseline)
+SELECT asset,
+       ROUND(AVG(f_vov), 3) as avg_f_vov,
+       ROUND(MIN(f_vov), 3) as min_f_vov,
+       ROUND(MAX(f_vov), 3) as max_f_vov
+FROM vov
+GROUP BY asset;
+```
+
 ### Joining Markets with Derivatives
 
 ```sql
@@ -450,7 +561,7 @@ conn.close()
 
 ## Charts
 
-The build script generates 11 diagnostic charts in `sample/`:
+The build script generates 14 diagnostic charts in `sample/`:
 
 | File | Description |
 |------|-------------|
@@ -465,3 +576,6 @@ The build script generates 11 diagnostic charts in `sample/`:
 | `funding_rates.png` | Funding rate time series for all 4 assets |
 | `market_price_examples.png` | 6 example market price trajectories (YES and NO lines) |
 | `data_summary.png` | Table image of row counts and date ranges |
+| `dvol_comparison_btc.png` | Official vs computed DVOL for BTC (r=0.9154) |
+| `dvol_comparison_eth.png` | Official vs computed DVOL for ETH (r=0.9539) |
+| `vov_timeseries.png` | VoV and f_vov scaling factor over time |

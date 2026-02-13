@@ -100,6 +100,41 @@ CREATE TABLE IF NOT EXISTS ohlcv (
     UNIQUE(asset, timestamp)
 );
 CREATE INDEX IF NOT EXISTS idx_ohlcv ON ohlcv(asset, timestamp);
+
+CREATE TABLE IF NOT EXISTS dvol_official (
+    asset TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    open REAL,
+    high REAL,
+    low REAL,
+    close REAL,
+    UNIQUE(asset, timestamp)
+);
+CREATE INDEX IF NOT EXISTS idx_dvol_off ON dvol_official(asset, timestamp);
+
+CREATE TABLE IF NOT EXISTS dvol_computed (
+    asset TEXT NOT NULL,
+    snapshot_hour INTEGER NOT NULL,
+    dvol REAL NOT NULL,
+    quality TEXT NOT NULL,
+    near_expiry TEXT,
+    far_expiry TEXT,
+    n_near_strikes INTEGER,
+    n_far_strikes INTEGER,
+    UNIQUE(asset, snapshot_hour)
+);
+CREATE INDEX IF NOT EXISTS idx_dvol_comp ON dvol_computed(asset, snapshot_hour);
+
+CREATE TABLE IF NOT EXISTS vov (
+    asset TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    dvol_daily REAL,
+    log_return REAL,
+    vov REAL,
+    f_vov REAL,
+    UNIQUE(asset, timestamp)
+);
+CREATE INDEX IF NOT EXISTS idx_vov ON vov(asset, timestamp);
 """
 
 DIRECTION_MAP = {
@@ -413,8 +448,6 @@ def build_futures(src: sqlite3.Connection, dst: sqlite3.Connection) -> int:
                     exp_str = expiry_iso_to_str(exp_iso) if exp_iso else None
 
                     mp = t["mark_price"]
-                    if cfg.is_inverse and t["index_price"]:
-                        mp = mp * t["index_price"]
 
                     batch.append((
                         current_hour, asset_name, inst,
@@ -453,8 +486,6 @@ def build_futures(src: sqlite3.Connection, dst: sqlite3.Connection) -> int:
                 exp_iso = ms_to_iso(exp_ms) if exp_ms else None
                 exp_str = expiry_iso_to_str(exp_iso) if exp_iso else None
                 mp = t["mark_price"]
-                if cfg.is_inverse and t["index_price"]:
-                    mp = mp * t["index_price"]
                 batch.append((
                     current_hour, asset_name, inst,
                     exp_iso, exp_str, mp,
@@ -596,6 +627,337 @@ def build_ohlcv(src: sqlite3.Connection, dst: sqlite3.Connection) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Step 7: DVOL official (copy from raw DB)
+# ---------------------------------------------------------------------------
+
+def build_dvol_official(src: sqlite3.Connection, dst: sqlite3.Connection) -> int:
+    console.print("\n[bold cyan]Step 7:[/] Building dvol_official table...")
+    t0 = time.perf_counter()
+
+    # Check if deribit_dvol table exists in source
+    tbl_check = src.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='deribit_dvol'"
+    ).fetchone()
+    if not tbl_check:
+        console.print("  [yellow]No deribit_dvol table in source DB — skipping[/]")
+        return 0
+
+    cursor = src.execute(
+        "SELECT asset, timestamp, open, high, low, close FROM deribit_dvol ORDER BY asset, timestamp"
+    )
+
+    batch = []
+    total = 0
+    for row in cursor:
+        batch.append((row[0], row[1], row[2], row[3], row[4], row[5]))
+        if len(batch) >= BATCH_SIZE:
+            dst.executemany(
+                "INSERT OR IGNORE INTO dvol_official VALUES (?,?,?,?,?,?)",
+                batch,
+            )
+            total += len(batch)
+            batch.clear()
+
+    if batch:
+        dst.executemany(
+            "INSERT OR IGNORE INTO dvol_official VALUES (?,?,?,?,?,?)",
+            batch,
+        )
+        total += len(batch)
+
+    dst.commit()
+    elapsed = time.perf_counter() - t0
+    console.print(f"  Inserted [green]{total:,}[/] DVOL official rows in {elapsed:.1f}s")
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Step 8: DVOL computed (from options snapshots)
+# ---------------------------------------------------------------------------
+
+def build_dvol_computed(dst: sqlite3.Connection) -> int:
+    console.print("\n[bold cyan]Step 8:[/] Computing DVOL from options snapshots...")
+    t0 = time.perf_counter()
+
+    from dvol_compute import compute_dvol_at_hour
+
+    grand_total = 0
+
+    for asset_name in ("BTC", "ETH", "SOL", "XRP"):
+        console.print(f"  Processing [yellow]{asset_name}[/]...")
+        at0 = time.perf_counter()
+
+        # Get all distinct snapshot hours for this asset
+        hours = dst.execute(
+            "SELECT DISTINCT snapshot_hour FROM options_snapshots WHERE asset=? ORDER BY snapshot_hour",
+            (asset_name,),
+        ).fetchall()
+
+        if not hours:
+            console.print(f"    {asset_name}: no options snapshots — skipping")
+            continue
+
+        # Build forward price lookup for BTC/ETH
+        forward_cache: dict[int, dict[str, float]] = {}
+        if asset_name in ("BTC", "ETH"):
+            fut_rows = dst.execute(
+                """SELECT snapshot_hour, expiry_date, mark_price
+                   FROM futures_snapshots
+                   WHERE asset=? AND expiry_date IS NOT NULL
+                   ORDER BY snapshot_hour""",
+                (asset_name,),
+            ).fetchall()
+            for frow in fut_rows:
+                sh = frow[0]
+                exp = frow[1]
+                mp = frow[2]
+                if sh not in forward_cache:
+                    forward_cache[sh] = {}
+                forward_cache[sh][exp] = mp
+
+        batch = []
+        asset_total = 0
+        low_quality = 0
+        total_hours = len(hours)
+
+        for (sh,) in hours:
+            # Get options at this hour
+            opts = dst.execute(
+                """SELECT instrument_name, strike, expiry_date, option_type,
+                          mark_iv, mark_price, underlying_price
+                   FROM options_snapshots
+                   WHERE asset=? AND snapshot_hour=?""",
+                (asset_name, sh),
+            ).fetchall()
+
+            if not opts:
+                continue
+
+            # Get spot price (use first underlying_price)
+            spot = None
+            for o in opts:
+                if o[6] and o[6] > 0:
+                    spot = o[6]
+                    break
+            if spot is None:
+                continue
+
+            options_list = []
+            for o in opts:
+                options_list.append({
+                    "strike": o[1],
+                    "expiry_date": o[2],
+                    "option_type": o[3],
+                    "mark_iv": o[4],
+                    "mark_price": o[5],
+                    "underlying_price": o[6],
+                })
+
+            # Forward prices
+            fwd = forward_cache.get(sh) if asset_name in ("BTC", "ETH") else None
+
+            result = compute_dvol_at_hour(options_list, sh, spot, fwd)
+            if result is None:
+                continue
+
+            if result["quality"] == "low":
+                low_quality += 1
+
+            batch.append((
+                asset_name, sh, result["dvol"], result["quality"],
+                result["near_expiry"], result["far_expiry"],
+                result["n_near_strikes"], result["n_far_strikes"],
+            ))
+
+            if len(batch) >= BATCH_SIZE:
+                dst.executemany(
+                    "INSERT OR IGNORE INTO dvol_computed VALUES (?,?,?,?,?,?,?,?)",
+                    batch,
+                )
+                asset_total += len(batch)
+                batch.clear()
+
+        if batch:
+            dst.executemany(
+                "INSERT OR IGNORE INTO dvol_computed VALUES (?,?,?,?,?,?,?,?)",
+                batch,
+            )
+            asset_total += len(batch)
+            batch.clear()
+
+        dst.commit()
+        grand_total += asset_total
+        elapsed = time.perf_counter() - at0
+
+        low_pct = (low_quality / total_hours * 100) if total_hours > 0 else 0
+        console.print(
+            f"    {asset_name}: [green]{asset_total:,}[/] DVOL rows "
+            f"({total_hours:,} hours, {low_pct:.0f}% low quality) in {elapsed:.1f}s"
+        )
+        if low_pct > 50:
+            console.print(
+                f"    [yellow]WARNING: {asset_name} has >{low_pct:.0f}% low quality DVOL hours[/]"
+            )
+
+    elapsed = time.perf_counter() - t0
+    console.print(f"  Total dvol_computed: [green]{grand_total:,}[/] rows in {elapsed:.1f}s")
+    return grand_total
+
+
+# ---------------------------------------------------------------------------
+# Step 9: VoV computation + validation
+# ---------------------------------------------------------------------------
+
+def build_vov(dst: sqlite3.Connection) -> int:
+    console.print("\n[bold cyan]Step 9:[/] Computing VoV + f_VoV...")
+    t0 = time.perf_counter()
+
+    from vov import resample_dvol_daily, compute_vov_series, add_f_vov_to_series
+
+    grand_total = 0
+
+    for asset_name in ("BTC", "ETH", "SOL", "XRP"):
+        console.print(f"  Processing [yellow]{asset_name}[/]...")
+
+        # Get computed DVOL (high/medium quality only)
+        rows = dst.execute(
+            """SELECT snapshot_hour, dvol FROM dvol_computed
+               WHERE asset=? AND quality IN ('high', 'medium')
+               ORDER BY snapshot_hour""",
+            (asset_name,),
+        ).fetchall()
+
+        if not rows:
+            console.print(f"    {asset_name}: no valid DVOL data — skipping")
+            continue
+
+        hourly = [{"timestamp": r[0], "dvol": r[1]} for r in rows]
+
+        # Resample to daily
+        daily = resample_dvol_daily(hourly)
+        console.print(f"    {asset_name}: {len(daily)} daily DVOL values from {len(hourly)} hourly")
+
+        if len(daily) < 2:
+            continue
+
+        # Compute VoV series
+        vov_records = compute_vov_series(daily)
+        vov_records = add_f_vov_to_series(vov_records)
+
+        # Insert
+        batch = []
+        for rec in vov_records:
+            batch.append((
+                asset_name, rec["timestamp"],
+                rec["dvol_daily"], rec["log_return"],
+                rec["vov"], rec["f_vov"],
+            ))
+
+        if batch:
+            dst.executemany(
+                "INSERT OR IGNORE INTO vov VALUES (?,?,?,?,?,?)",
+                batch,
+            )
+            dst.commit()
+            grand_total += len(batch)
+
+        # Stats
+        valid_vov = [r["vov"] for r in vov_records if r["vov"] is not None]
+        valid_fvov = [r["f_vov"] for r in vov_records if r["f_vov"] is not None]
+        console.print(
+            f"    {asset_name}: {len(batch)} VoV rows, "
+            f"{len(valid_vov)} with valid VoV"
+        )
+        if valid_vov:
+            console.print(
+                f"      VoV: mean={sum(valid_vov)/len(valid_vov):.4f}, "
+                f"min={min(valid_vov):.4f}, max={max(valid_vov):.4f}"
+            )
+        if valid_fvov:
+            console.print(
+                f"      f_VoV: mean={sum(valid_fvov)/len(valid_fvov):.4f}, "
+                f"min={min(valid_fvov):.4f}, max={max(valid_fvov):.4f}"
+            )
+
+    # --- Validation: BTC/ETH computed vs official DVOL ---
+    console.print("\n  [bold]DVOL Validation (Computed vs Official):[/]")
+    _print_dvol_validation(dst)
+
+    elapsed = time.perf_counter() - t0
+    console.print(f"  Total VoV rows: [green]{grand_total:,}[/] in {elapsed:.1f}s")
+    return grand_total
+
+
+def _print_dvol_validation(dst: sqlite3.Connection):
+    """Print correlation/MAE/RMSE between computed and official DVOL for BTC/ETH."""
+    import math
+
+    for asset in ("BTC", "ETH"):
+        # Get official daily close
+        off_rows = dst.execute(
+            "SELECT timestamp, close FROM dvol_official WHERE asset=? ORDER BY timestamp",
+            (asset,),
+        ).fetchall()
+        if not off_rows:
+            console.print(f"    {asset}: no official DVOL data for validation")
+            continue
+
+        # Get computed — resample to daily for fair comparison
+        comp_rows = dst.execute(
+            """SELECT snapshot_hour, dvol FROM dvol_computed
+               WHERE asset=? AND quality IN ('high', 'medium')
+               ORDER BY snapshot_hour""",
+            (asset,),
+        ).fetchall()
+        if not comp_rows:
+            console.print(f"    {asset}: no computed DVOL data for validation")
+            continue
+
+        # Build daily maps (floor to day)
+        off_daily: dict[str, float] = {}
+        for ts, close in off_rows:
+            import datetime as _dt
+            day = _dt.datetime.fromtimestamp(ts / 1000, tz=_dt.timezone.utc).strftime("%Y-%m-%d")
+            off_daily[day] = close  # last value wins (sorted by ts)
+
+        comp_daily: dict[str, float] = {}
+        for sh, dvol in comp_rows:
+            import datetime as _dt
+            day = _dt.datetime.fromtimestamp(sh / 1000, tz=_dt.timezone.utc).strftime("%Y-%m-%d")
+            comp_daily[day] = dvol
+
+        # Match days
+        common_days = sorted(set(off_daily) & set(comp_daily))
+        if len(common_days) < 5:
+            console.print(f"    {asset}: only {len(common_days)} common days — insufficient for validation")
+            continue
+
+        official_vals = [off_daily[d] for d in common_days]
+        computed_vals = [comp_daily[d] for d in common_days]
+
+        # Pearson correlation
+        n = len(common_days)
+        mean_o = sum(official_vals) / n
+        mean_c = sum(computed_vals) / n
+        cov = sum((o - mean_o) * (c - mean_c) for o, c in zip(official_vals, computed_vals)) / n
+        std_o = math.sqrt(sum((o - mean_o) ** 2 for o in official_vals) / n)
+        std_c = math.sqrt(sum((c - mean_c) ** 2 for c in computed_vals) / n)
+        corr = cov / (std_o * std_c) if std_o > 0 and std_c > 0 else 0
+
+        # MAE
+        mae = sum(abs(o - c) for o, c in zip(official_vals, computed_vals)) / n
+
+        # RMSE
+        rmse = math.sqrt(sum((o - c) ** 2 for o, c in zip(official_vals, computed_vals)) / n)
+
+        status = "[green]PASS[/]" if corr > 0.90 else "[red]FAIL[/]"
+        console.print(
+            f"    {asset}: r={corr:.4f} {status}, MAE={mae:.4f}, RMSE={rmse:.4f}, "
+            f"n={n} days"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
@@ -605,7 +967,8 @@ def print_summary(dst: sqlite3.Connection):
     table.add_column("Rows", justify="right", style="green")
 
     for tbl in ("markets", "market_prices", "options_snapshots",
-                "futures_snapshots", "funding_rates", "ohlcv"):
+                "futures_snapshots", "funding_rates", "ohlcv",
+                "dvol_official", "dvol_computed", "vov"):
         count = dst.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
         table.add_row(tbl, f"{count:,}")
 
@@ -850,12 +1213,70 @@ def build_charts(dst: sqlite3.Connection):
         fig.tight_layout()
         save(fig, "market_price_examples.png")
 
-    # ---- 11. Data summary table ----
+    # ---- 11. DVOL comparison: computed vs official (BTC/ETH) ----
+    for asset in ("BTC", "ETH"):
+        off = dst.execute(
+            "SELECT timestamp, close FROM dvol_official WHERE asset=? ORDER BY timestamp",
+            (asset,),
+        ).fetchall()
+        comp = dst.execute(
+            "SELECT snapshot_hour, dvol FROM dvol_computed WHERE asset=? AND quality IN ('high','medium') ORDER BY snapshot_hour",
+            (asset,),
+        ).fetchall()
+        if off and comp:
+            fig, ax = plt.subplots(figsize=(12, 5))
+            off_times = [_dt.datetime.fromtimestamp(r[0] / 1000, tz=_dt.timezone.utc) for r in off]
+            off_vals = [r[1] for r in off]
+            comp_times = [_dt.datetime.fromtimestamp(r[0] / 1000, tz=_dt.timezone.utc) for r in comp]
+            comp_vals = [r[1] for r in comp]
+            ax.plot(off_times, off_vals, linewidth=0.8, color="#264653", label="Official DVOL", alpha=0.8)
+            ax.plot(comp_times, comp_vals, linewidth=0.8, color="#e76f51", label="Computed DVOL", alpha=0.8)
+            ax.set_title(f"{asset} DVOL: Computed vs Official")
+            ax.set_ylabel("DVOL (decimal)")
+            ax.legend()
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+            fig.autofmt_xdate()
+            save(fig, f"dvol_comparison_{asset.lower()}.png")
+
+    # ---- 12. VoV + f_VoV time series ----
+    vov_data = {}
+    for asset in ("BTC", "ETH", "SOL", "XRP"):
+        rows = dst.execute(
+            "SELECT timestamp, vov, f_vov FROM vov WHERE asset=? AND vov IS NOT NULL ORDER BY timestamp",
+            (asset,),
+        ).fetchall()
+        if rows:
+            vov_data[asset] = rows
+
+    if vov_data:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+        for asset, rows in vov_data.items():
+            times = [_dt.datetime.fromtimestamp(r[0] / 1000, tz=_dt.timezone.utc) for r in rows]
+            vov_vals = [r[1] for r in rows]
+            fvov_vals = [r[2] for r in rows]
+            ax1.plot(times, vov_vals, linewidth=0.8, label=asset, alpha=0.8)
+            ax2.plot(times, fvov_vals, linewidth=0.8, label=asset, alpha=0.8)
+
+        ax1.set_title("Volatility of Volatility (VoV)")
+        ax1.set_ylabel("VoV (annualized)")
+        ax1.legend()
+
+        ax2.set_title("f_VoV Scaling Factor")
+        ax2.set_ylabel("f_VoV")
+        ax2.axhline(1.0, color="gray", linewidth=0.5, linestyle="--")
+        ax2.legend()
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+        fig.autofmt_xdate()
+        fig.tight_layout()
+        save(fig, "vov_timeseries.png")
+
+    # ---- 13. Data summary table ----
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.axis("off")
     summary_data = []
     for tbl in ("markets", "market_prices", "options_snapshots",
-                "futures_snapshots", "funding_rates", "ohlcv"):
+                "futures_snapshots", "funding_rates", "ohlcv",
+                "dvol_official", "dvol_computed", "vov"):
         cnt = dst.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
 
         # Date range
@@ -878,8 +1299,16 @@ def build_charts(dst: sqlite3.Connection):
                 date_range = f"{d0} to {d1}"
             else:
                 date_range = "N/A"
-        elif tbl in ("funding_rates", "ohlcv"):
+        elif tbl in ("funding_rates", "ohlcv", "dvol_official", "vov"):
             r = dst.execute(f"SELECT MIN(timestamp), MAX(timestamp) FROM {tbl}").fetchone()
+            if r[0]:
+                d0 = _dt.datetime.fromtimestamp(r[0] / 1000, tz=_dt.timezone.utc).strftime("%Y-%m-%d")
+                d1 = _dt.datetime.fromtimestamp(r[1] / 1000, tz=_dt.timezone.utc).strftime("%Y-%m-%d")
+                date_range = f"{d0} to {d1}"
+            else:
+                date_range = "N/A"
+        elif tbl == "dvol_computed":
+            r = dst.execute("SELECT MIN(snapshot_hour), MAX(snapshot_hour) FROM dvol_computed").fetchone()
             if r[0]:
                 d0 = _dt.datetime.fromtimestamp(r[0] / 1000, tz=_dt.timezone.utc).strftime("%Y-%m-%d")
                 d1 = _dt.datetime.fromtimestamp(r[1] / 1000, tz=_dt.timezone.utc).strftime("%Y-%m-%d")
@@ -931,6 +1360,9 @@ def main():
         build_futures(src, dst)
         build_funding(src, dst)
         build_ohlcv(src, dst)
+        build_dvol_official(src, dst)
+        build_dvol_computed(dst)
+        build_vov(dst)
         print_summary(dst)
 
         if not args.no_charts:

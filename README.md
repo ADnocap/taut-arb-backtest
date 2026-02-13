@@ -19,15 +19,17 @@ Polymarket lists thousands of prediction markets on crypto price events ("Will B
 │     Polymarket Gamma ── active markets                      │
 │     Goldsky GraphQL ─── price backfill for gaps             │
 │     Deribit History ─── options trades, futures, OHLCV      │
-│     Deribit Main ────── funding rates                       │
+│     Deribit Main ────── funding rates, DVOL index           │
 ├─────────────────────────────────────────────────────────────┤
-│  2. STORAGE            SQLite (9 raw tables → 6 snapshot    │
+│  2. STORAGE            SQLite (10 raw tables → 9 snapshot   │
 │                        tables in sample DB)                 │
 ├─────────────────────────────────────────────────────────────┤
 │  3. ANALYSIS           IV surface reconstruction            │
 │                        Forward curve interpolation           │
 │                        Rogers-Satchell realized volatility   │
 │                        Funding rate drift estimation         │
+│                        DVOL computation (Carr-Madan)         │
+│                        Volatility-of-volatility (VoV)        │
 ├─────────────────────────────────────────────────────────────┤
 │  4. BACKTEST           Model probability vs market price    │
 │                        Edge calculation + PnL simulation    │
@@ -42,18 +44,18 @@ Polymarket lists thousands of prediction markets on crypto price events ("Will B
 | Polymarket Gamma | `gamma-api.polymarket.com` | Active markets (offset pagination) |
 | Goldsky GraphQL | `api.goldsky.com` | Price backfill for ~30-50% of settled markets |
 | Deribit History | `history.deribit.com` | Options trades with IV, dated futures, 1h OHLCV |
-| Deribit Main | `www.deribit.com` | 8-hour perpetual funding rates |
+| Deribit Main | `www.deribit.com` | 8-hour perpetual funding rates, DVOL index |
 
 No API keys required — all endpoints are public.
 
 ## Dataset
 
-Pre-collected databases covering April 2025 – February 2026 are available as a [GitHub Release](https://github.com/ADnocap/taut-arb-backtest/releases/tag/v1.0-data):
+Pre-collected databases covering April 2025 – February 2026 are available as a [GitHub Release](https://github.com/ADnocap/taut-arb-backtest/releases/tag/v2.0-data):
 
 | File | Contents | Raw Size | Download |
 |------|----------|----------|----------|
-| `backtest_data.db.gz` | Raw trade-level data (9 tables, ~12M rows) | 2.4 GB | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v1.0-data/backtest_data.db.gz) |
-| `backtest_sample.db.gz` | Hourly snapshots for backtesting (6 tables) | 1.5 GB | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v1.0-data/backtest_sample.db.gz) |
+| `backtest_data.db.gz` | Raw trade-level data (10 tables, ~12M rows) | 2.4 GB | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v2.0-data/backtest_data.db.gz) |
+| `backtest_sample.db.gz` | Hourly snapshots for backtesting (9 tables, incl. DVOL/VoV) | 1.5 GB | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v2.0-data/backtest_sample.db.gz) |
 
 To decompress:
 
@@ -82,6 +84,14 @@ The `sample/` directory contains a pre-built SQLite database with hourly snapsho
 
 ![Funding Rates](sample/funding_rates.png)
 
+### DVOL — Computed vs Official (BTC)
+
+![DVOL Comparison BTC](sample/dvol_comparison_btc.png)
+
+### Volatility-of-Volatility (VoV)
+
+![VoV Timeseries](sample/vov_timeseries.png)
+
 ## Quick Start
 
 ```bash
@@ -93,11 +103,12 @@ python collect.py --assets BTC --step 1
 # Collect price histories
 python collect.py --assets BTC --step 2
 
-# Collect Deribit options, futures, funding, OHLCV (steps 3–6)
+# Collect Deribit options, futures, funding, OHLCV, DVOL (steps 3–7)
 python collect.py --assets BTC --step 3
 python collect.py --assets BTC --step 4
 python collect.py --assets BTC --step 5
 python collect.py --assets BTC --step 6
+python collect.py --assets BTC --step 7
 
 # Validate collected data
 python validate.py
@@ -117,6 +128,8 @@ classifier.py                   Market classification regex
 collect.py                      CLI orchestrator (--assets, --step)
 validate.py                     Data quality report (Rich tables)
 build_sample.py                 Build sample DB + charts from raw data
+dvol_compute.py                 VIX-style DVOL from options (Black-76 + Carr-Madan)
+vov.py                          Volatility-of-volatility computation
 collectors/
   base.py                       BaseCollector with retry/backoff/semaphore
   polymarket_markets.py         CLOB + Gamma market discovery
@@ -125,15 +138,17 @@ collectors/
   deribit_futures.py            Dated futures (perpetuals filtered)
   deribit_funding.py            Funding rates (30-day chunks)
   deribit_ohlcv.py              1h OHLCV candles (30-day chunks)
+  deribit_dvol.py               DVOL volatility index candles (hourly)
 sample/
   DATA_GUIDE.md                 Full schema docs + query examples
   *.png                         Diagnostic charts
-backtest_guide.md               Complete technical specification
 ```
 
 ## Status
 
-- Data collection pipeline: **complete** (all 6 APIs, 4 assets)
-- Sample database builder: **complete** (hourly snapshots + charts)
+- Data collection pipeline: **complete** (all 6 APIs, 4 assets, incl. DVOL)
+- Sample database builder: **complete** (9 tables, hourly snapshots + charts)
+- DVOL computation: **complete** (BTC r=0.92, ETH r=0.95 vs official)
+- VoV computation: **complete** (30-day rolling, f_vov scaling factor)
 - Analysis engine: **in progress**
 - Backtester: **planned**

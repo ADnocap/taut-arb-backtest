@@ -8,6 +8,7 @@ import sys
 from rich.console import Console
 from rich.logging import RichHandler
 
+from collectors.deribit_dvol import DeribitDVOLCollector
 from collectors.deribit_funding import DeribitFundingCollector
 from collectors.deribit_futures import DeribitFuturesCollector
 from collectors.deribit_ohlcv import DeribitOHLCVCollector
@@ -25,6 +26,7 @@ STEPS = {
     4: "Deribit futures trades",
     5: "Deribit funding rates",
     6: "Deribit OHLCV candles",
+    7: "Deribit DVOL candles",
 }
 
 
@@ -76,6 +78,12 @@ async def run_pipeline(assets: list[str], step: int | None = None, clear_prices:
                     for asset in assets:
                         count = await collector.collect(db, asset)
                         console.print(f"  {asset}: {count} OHLCV candles")
+
+            elif s == 7:
+                async with DeribitDVOLCollector() as collector:
+                    for asset in assets:
+                        count = await collector.collect(db, asset)
+                        console.print(f"  {asset}: {count} DVOL candles")
 
         # Run validation report
         console.rule("[bold]Validation Report")

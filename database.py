@@ -90,6 +90,18 @@ CREATE TABLE IF NOT EXISTS deribit_ohlcv (
     UNIQUE(asset, timestamp, resolution)
 );
 
+-- Deribit DVOL (volatility index candles)
+CREATE TABLE IF NOT EXISTS deribit_dvol (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER NOT NULL,
+    asset TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    UNIQUE(asset, timestamp)
+);
+
 -- Precomputed options snapshots
 CREATE TABLE IF NOT EXISTS options_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,6 +145,7 @@ CREATE INDEX IF NOT EXISTS idx_price_history_cond ON polymarket_price_history(co
 CREATE INDEX IF NOT EXISTS idx_futures_asset_ts ON deribit_futures_history(asset, timestamp);
 CREATE INDEX IF NOT EXISTS idx_funding_asset_ts ON deribit_funding_history(asset, timestamp);
 CREATE INDEX IF NOT EXISTS idx_ohlcv_asset_ts ON deribit_ohlcv(asset, timestamp);
+CREATE INDEX IF NOT EXISTS idx_dvol_asset_ts ON deribit_dvol(asset, timestamp);
 CREATE INDEX IF NOT EXISTS idx_predictions_cond ON backtest_predictions(condition_id);
 """
 
@@ -271,6 +284,17 @@ class Database:
         )
         await self._db.commit()
 
+    async def insert_dvol_candles(self, rows: list[dict]):
+        if not rows:
+            return
+        await self._db.executemany(
+            """INSERT OR IGNORE INTO deribit_dvol
+               (timestamp, asset, open, high, low, close)
+               VALUES (:timestamp, :asset, :open, :high, :low, :close)""",
+            rows,
+        )
+        await self._db.commit()
+
     # ---- Resume helpers ----
 
     async def get_latest_option_trade_timestamp(self, asset: str) -> int | None:
@@ -292,6 +316,14 @@ class Database:
     async def get_latest_funding_timestamp(self, asset: str) -> int | None:
         cur = await self._db.execute(
             "SELECT MAX(timestamp) FROM deribit_funding_history WHERE asset=?",
+            (asset,),
+        )
+        row = await cur.fetchone()
+        return row[0] if row and row[0] else None
+
+    async def get_latest_dvol_timestamp(self, asset: str) -> int | None:
+        cur = await self._db.execute(
+            "SELECT MAX(timestamp) FROM deribit_dvol WHERE asset=?",
             (asset,),
         )
         row = await cur.fetchone()
@@ -351,7 +383,7 @@ class Database:
             "polymarket_markets", "polymarket_price_history",
             "deribit_option_trades", "deribit_futures_history",
             "deribit_funding_history", "deribit_ohlcv",
-            "options_snapshots", "backtest_predictions",
+            "deribit_dvol", "options_snapshots", "backtest_predictions",
         ]
         counts = {}
         for t in tables:
