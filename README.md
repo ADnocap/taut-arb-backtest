@@ -1,6 +1,7 @@
 # Taut-Arb-Backtest
 
-Backtesting framework for crypto prediction market arbitrage — compares Polymarket prices against model-derived probabilities from Deribit derivatives data.
+- Backtesting data for crypto prediction market arbitrage — compares Polymarket prices against model-derived probabilities from Deribit derivatives data.
+- Backtesting data for sports bets on Polymarket — compares de-vigged odds from sharp bookmaker Pinnacle
 
 ## Overview
 
@@ -38,13 +39,13 @@ Polymarket lists thousands of prediction markets on crypto price events ("Will B
 
 ## Data Sources
 
-| Source | Endpoint | Data |
-|--------|----------|------|
-| Polymarket CLOB | `clob.polymarket.com` | Market discovery, price history (cursor pagination) |
-| Polymarket Gamma | `gamma-api.polymarket.com` | Active markets (offset pagination) |
-| Goldsky GraphQL | `api.goldsky.com` | Price backfill for ~30-50% of settled markets |
-| Deribit History | `history.deribit.com` | Options trades with IV, dated futures, 1h OHLCV |
-| Deribit Main | `www.deribit.com` | 8-hour perpetual funding rates, DVOL index |
+| Source           | Endpoint                   | Data                                                |
+| ---------------- | -------------------------- | --------------------------------------------------- |
+| Polymarket CLOB  | `clob.polymarket.com`      | Market discovery, price history (cursor pagination) |
+| Polymarket Gamma | `gamma-api.polymarket.com` | Active markets (offset pagination)                  |
+| Goldsky GraphQL  | `api.goldsky.com`          | Price backfill for ~30-50% of settled markets       |
+| Deribit History  | `history.deribit.com`      | Options trades with IV, dated futures, 1h OHLCV     |
+| Deribit Main     | `www.deribit.com`          | 8-hour perpetual funding rates, DVOL index          |
 
 No API keys required — all endpoints are public.
 
@@ -52,10 +53,10 @@ No API keys required — all endpoints are public.
 
 Pre-collected databases covering April 2025 – February 2026 are available as a [GitHub Release](https://github.com/ADnocap/taut-arb-backtest/releases/tag/v2.0-data):
 
-| File | Contents | Raw Size | Download |
-|------|----------|----------|----------|
-| `backtest_data.db.gz` | Raw trade-level data (10 tables, ~12M rows) | 2.4 GB | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v2.0-data/backtest_data.db.gz) |
-| `backtest_sample.db.gz` | Hourly snapshots for backtesting (9 tables, incl. DVOL/VoV) | 1.5 GB | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v2.0-data/backtest_sample.db.gz) |
+| File                    | Contents                                                    | Raw Size | Download                                                                                                   |
+| ----------------------- | ----------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------- |
+| `backtest_data.db.gz`   | Raw trade-level data (10 tables, ~12M rows)                 | 2.4 GB   | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v2.0-data/backtest_data.db.gz)   |
+| `backtest_sample.db.gz` | Hourly snapshots for backtesting (9 tables, incl. DVOL/VoV) | 1.5 GB   | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v2.0-data/backtest_sample.db.gz) |
 
 To decompress:
 
@@ -102,10 +103,10 @@ Polymarket prediction prices vs vig-removed sportsbook implied probabilities acr
 
 Pre-built datasets are available as a [GitHub Release](https://github.com/ADnocap/taut-arb-backtest/releases/tag/v3.0-sports):
 
-| File | Contents | Download |
-|------|----------|----------|
-| `sports_data.db.gz` | SQLite database (5 tables, raw prices + odds + matches) | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v3.0-sports/sports_data.db.gz) |
-| `sports_dataset.csv.gz` | Final aligned CSV (1.58M rows, 6 columns) | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v3.0-sports/sports_dataset.csv.gz) |
+| File                    | Contents                                                | Download                                                                                                     |
+| ----------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `sports_data.db.gz`     | SQLite database (5 tables, raw prices + odds + matches) | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v3.0-sports/sports_data.db.gz)     |
+| `sports_dataset.csv.gz` | Final aligned CSV (1.58M rows, 6 columns)               | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v3.0-sports/sports_dataset.csv.gz) |
 
 See [`sports/README.md`](sports/README.md) for full documentation — schema, vig-removal math, matching methodology, and query examples.
 
@@ -183,13 +184,3 @@ sports/
     odds_api.py                 The Odds API historical h2h odds
   charts/                       Diagnostic charts (8 PNGs)
 ```
-
-## Status
-
-- Data collection pipeline: **complete** (all 6 APIs, 4 assets, incl. DVOL)
-- Sample database builder: **complete** (9 tables, hourly snapshots + charts)
-- DVOL computation: **complete** (BTC r=0.92, ETH r=0.95 vs official)
-- VoV computation: **complete** (30-day rolling, f_vov scaling factor)
-- Sports dataset: **complete** (6 sports, 5,171 events, 1.58M rows)
-- Analysis engine: **in progress**
-- Backtester: **planned**
