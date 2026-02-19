@@ -92,6 +92,35 @@ The `sample/` directory contains a pre-built SQLite database with hourly snapsho
 
 ![VoV Timeseries](sample/vov_timeseries.png)
 
+## Sports Dataset
+
+Polymarket prediction prices vs vig-removed sportsbook implied probabilities across 6 sports — moneyline (match-winner) markets only.
+
+**Sports:** NBA, NFL, NHL, MLB, Soccer, Tennis
+**Coverage:** March 2023 -- February 2026
+**Events:** 5,171 matched events, 1.58M price observations
+
+Pre-built datasets are available as a [GitHub Release](https://github.com/ADnocap/taut-arb-backtest/releases/tag/v3.0-sports):
+
+| File | Contents | Download |
+|------|----------|----------|
+| `sports_data.db.gz` | SQLite database (5 tables, raw prices + odds + matches) | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v3.0-sports/sports_data.db.gz) |
+| `sports_dataset.csv.gz` | Final aligned CSV (1.58M rows, 6 columns) | [Download](https://github.com/ADnocap/taut-arb-backtest/releases/download/v3.0-sports/sports_dataset.csv.gz) |
+
+See [`sports/README.md`](sports/README.md) for full documentation — schema, vig-removal math, matching methodology, and query examples.
+
+### Data Volume per Sport
+
+![Rows per Sport](sports/charts/rows_per_sport.png)
+
+### Polymarket Price vs Bookmaker Implied Probability
+
+![Poly vs Odds](sports/charts/poly_vs_odds_scatter.png)
+
+### Calibration Curve
+
+![Calibration](sports/charts/calibration_curve.png)
+
 ## Quick Start
 
 ```bash
@@ -142,6 +171,17 @@ collectors/
 sample/
   DATA_GUIDE.md                 Full schema docs + query examples
   *.png                         Diagnostic charts
+sports/
+  README.md                     Sports dataset documentation + math
+  config.py                     Sport definitions, team aliases, constants
+  database.py                   SQLite schema (5 tables), query helpers
+  matcher.py                    Cross-reference Polymarket ↔ Odds API events
+  build_dataset.py              CLI orchestrator + CSV export + charts
+  collectors/
+    polymarket_markets.py       Gamma series-based market discovery
+    polymarket_prices.py        Goldsky + CLOB 15-min price history
+    odds_api.py                 The Odds API historical h2h odds
+  charts/                       Diagnostic charts (8 PNGs)
 ```
 
 ## Status
@@ -150,5 +190,6 @@ sample/
 - Sample database builder: **complete** (9 tables, hourly snapshots + charts)
 - DVOL computation: **complete** (BTC r=0.92, ETH r=0.95 vs official)
 - VoV computation: **complete** (30-day rolling, f_vov scaling factor)
+- Sports dataset: **complete** (6 sports, 5,171 events, 1.58M rows)
 - Analysis engine: **in progress**
 - Backtester: **planned**

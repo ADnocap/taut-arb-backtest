@@ -3,6 +3,7 @@
 *.db-wal
 *.db-shm
 *.gz
+sports_dataset.csv
 
 # Python
 __pycache__/
@@ -21,3 +22,5 @@ venv/
 .idea/
 *.swp
 *.swo
+
+.env
