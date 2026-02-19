@@ -10,25 +10,25 @@ Polymarket prediction prices vs vig-removed sportsbook implied probabilities acr
 
 File: `sports_dataset.csv`
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `datetime` | ISO 8601 UTC | Observation timestamp (15-minute grid) |
-| `event_name` | string | `"{Sport}: {question or team matchup}"` |
-| `poly_price` | float [0, 1] | Polymarket price for team A / YES outcome |
-| `poly_price_b` | float [0, 1] | Polymarket price for team B / NO outcome |
-| `odds` | float [0, 1] | Vig-removed bookmaker implied probability |
-| `forward_filled` | 0 or 1 | 1 if this row was forward-filled from a prior observation |
+| Column           | Type         | Description                                               |
+| ---------------- | ------------ | --------------------------------------------------------- |
+| `datetime`       | ISO 8601 UTC | Observation timestamp (15-minute grid)                    |
+| `event_name`     | string       | `"{Sport}: {question or team matchup}"`                   |
+| `poly_price`     | float [0, 1] | Polymarket price for team A / YES outcome                 |
+| `poly_price_b`   | float [0, 1] | Polymarket price for team B / NO outcome                  |
+| `odds`           | float [0, 1] | Vig-removed bookmaker implied probability                 |
+| `forward_filled` | 0 or 1       | 1 if this row was forward-filled from a prior observation |
 
 ### Row Counts by Sport
 
-| Sport | Rows | Events | Date Range |
-|-------|-----:|-------:|------------|
-| NBA | 74,785 | 610 | 2025-10 -- 2026-02 |
-| NFL | 168,494 | 280 | 2025-09 -- 2026-02 |
-| NHL | 101,631 | 784 | 2025-10 -- 2026-02 |
-| MLB | 173,566 | 1,395 | 2023-03 -- 2025-11 |
-| Soccer | 995,967 | 1,669 | 2025-11 -- 2026-02 |
-| Tennis | 61,148 | 433 | 2025-10 -- 2026-02 |
+| Sport     |          Rows |    Events | Date Range             |
+| --------- | ------------: | --------: | ---------------------- |
+| NBA       |        74,785 |       610 | 2025-10 -- 2026-02     |
+| NFL       |       168,494 |       280 | 2025-09 -- 2026-02     |
+| NHL       |       101,631 |       784 | 2025-10 -- 2026-02     |
+| MLB       |       173,566 |     1,395 | 2023-03 -- 2025-11     |
+| Soccer    |       995,967 |     1,669 | 2025-11 -- 2026-02     |
+| Tennis    |        61,148 |       433 | 2025-10 -- 2026-02     |
 | **Total** | **1,575,591** | **5,171** | **2023-03 -- 2026-02** |
 
 ---
@@ -56,18 +56,20 @@ Step 6: Generate charts ──── 8 diagnostic PNGs in sports/charts/
 
 ### Data Sources
 
-| Source | Endpoint | Auth | Data |
-|--------|----------|------|------|
-| Polymarket Gamma | `gamma-api.polymarket.com` | None | Market discovery (series-based) |
-| Goldsky GraphQL | `api.goldsky.com` | None | 15-min price candles (primary) |
-| Polymarket CLOB | `clob.polymarket.com` | None | Price history fallback |
-| The Odds API | `api.the-odds-api.com/v4` | API key | Historical h2h odds snapshots |
+| Source           | Endpoint                   | Auth    | Data                            |
+| ---------------- | -------------------------- | ------- | ------------------------------- |
+| Polymarket Gamma | `gamma-api.polymarket.com` | None    | Market discovery (series-based) |
+| Goldsky GraphQL  | `api.goldsky.com`          | None    | 15-min price candles (primary)  |
+| Polymarket CLOB  | `clob.polymarket.com`      | None    | Price history fallback          |
+| The Odds API     | `api.the-odds-api.com/v4`  | API key | Historical h2h odds snapshots   |
 
 ---
 
 ## Vig Removal
 
 Sportsbook odds include a "vig" (vigorish / overround) -- the booksum exceeds 1. We remove this before comparing to Polymarket prices.
+**IMPORTANT NOTE: The vig is only removed in the CSV. The odds column in sports_dataset.csv is the vig-removed implied probability.
+The .db file stores raw decimal odds (home_odds, away_odds, draw_odds in the odds_snapshots table) straight from the bookmakers — vig still baked in.**
 
 ### Binary Markets (n = 2) -- Additive Method
 
@@ -116,6 +118,7 @@ Each Polymarket market is matched to an Odds API event through a multi-stage pro
 ### 1. Date Proximity
 
 Events must occur within **1 calendar day** of each other. The comparison uses:
+
 - `game_start_time` (unix timestamp) if available from Polymarket
 - `game_date` (string YYYY-MM-DD) as fallback, compared to `commence_time` from Odds API
 
@@ -140,6 +143,7 @@ Individual sports use last-name extraction: "Djokovic" matches "Novak Djokovic" 
 ### 5. Soccer: Question Parsing
 
 Soccer markets on Polymarket are phrased as questions:
+
 - `"Will Arsenal win on 2025-01-15?"` → win market, single-team match
 - `"Will Arsenal vs. Chelsea end in a draw?"` → draw market, two-team match
 
@@ -153,71 +157,71 @@ File: `sports_data.db` (SQLite)
 
 ### sports_markets
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | INTEGER PK | Auto-increment |
-| `condition_id` | TEXT UNIQUE | Polymarket condition identifier |
-| `sport` | TEXT | Sport name (NBA, NFL, etc.) |
-| `question` | TEXT | Market question text |
-| `team_a` | TEXT | First team / outcome |
-| `team_b` | TEXT | Second team / outcome |
-| `game_date` | TEXT | Game date (YYYY-MM-DD) |
-| `game_start_time` | INTEGER | Unix timestamp of game start |
-| `token_a_id` | TEXT | CLOB token ID for team A |
-| `token_b_id` | TEXT | CLOB token ID for team B |
-| `winner` | TEXT | Winning team (if settled) |
-| `outcome` | TEXT | Market outcome |
+| Column            | Type        | Description                     |
+| ----------------- | ----------- | ------------------------------- |
+| `id`              | INTEGER PK  | Auto-increment                  |
+| `condition_id`    | TEXT UNIQUE | Polymarket condition identifier |
+| `sport`           | TEXT        | Sport name (NBA, NFL, etc.)     |
+| `question`        | TEXT        | Market question text            |
+| `team_a`          | TEXT        | First team / outcome            |
+| `team_b`          | TEXT        | Second team / outcome           |
+| `game_date`       | TEXT        | Game date (YYYY-MM-DD)          |
+| `game_start_time` | INTEGER     | Unix timestamp of game start    |
+| `token_a_id`      | TEXT        | CLOB token ID for team A        |
+| `token_b_id`      | TEXT        | CLOB token ID for team B        |
+| `winner`          | TEXT        | Winning team (if settled)       |
+| `outcome`         | TEXT        | Market outcome                  |
 
 ### sports_price_history
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | INTEGER PK | Auto-increment |
-| `condition_id` | TEXT | FK to sports_markets |
-| `timestamp` | INTEGER | Unix timestamp (15-min buckets) |
-| `team_a_price` | REAL | Price for team A [0, 1] |
-| `team_b_price` | REAL | Price for team B [0, 1] |
-| `source` | TEXT | `'goldsky'` or `'clob'` |
-| | | UNIQUE(condition_id, timestamp) |
+| Column         | Type       | Description                     |
+| -------------- | ---------- | ------------------------------- |
+| `id`           | INTEGER PK | Auto-increment                  |
+| `condition_id` | TEXT       | FK to sports_markets            |
+| `timestamp`    | INTEGER    | Unix timestamp (15-min buckets) |
+| `team_a_price` | REAL       | Price for team A [0, 1]         |
+| `team_b_price` | REAL       | Price for team B [0, 1]         |
+| `source`       | TEXT       | `'goldsky'` or `'clob'`         |
+|                |            | UNIQUE(condition_id, timestamp) |
 
 ### odds_snapshots
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | INTEGER PK | Auto-increment |
-| `odds_event_id` | TEXT | Odds API event identifier |
-| `sport` | TEXT | Sport name |
-| `home_team` | TEXT | Home team name |
-| `away_team` | TEXT | Away team name |
-| `commence_time` | INTEGER | Event start time (unix) |
-| `snapshot_ts` | INTEGER | Odds snapshot timestamp |
-| `home_odds` | REAL | Decimal odds for home team |
-| `away_odds` | REAL | Decimal odds for away team |
-| `draw_odds` | REAL | Decimal odds for draw (soccer only) |
-| `bookmaker` | TEXT | Bookmaker name |
-| | | UNIQUE(odds_event_id, snapshot_ts, bookmaker) |
+| Column          | Type       | Description                                   |
+| --------------- | ---------- | --------------------------------------------- |
+| `id`            | INTEGER PK | Auto-increment                                |
+| `odds_event_id` | TEXT       | Odds API event identifier                     |
+| `sport`         | TEXT       | Sport name                                    |
+| `home_team`     | TEXT       | Home team name                                |
+| `away_team`     | TEXT       | Away team name                                |
+| `commence_time` | INTEGER    | Event start time (unix)                       |
+| `snapshot_ts`   | INTEGER    | Odds snapshot timestamp                       |
+| `home_odds`     | REAL       | Decimal odds for home team                    |
+| `away_odds`     | REAL       | Decimal odds for away team                    |
+| `draw_odds`     | REAL       | Decimal odds for draw (soccer only)           |
+| `bookmaker`     | TEXT       | Bookmaker name                                |
+|                 |            | UNIQUE(odds_event_id, snapshot_ts, bookmaker) |
 
 ### matched_events
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | INTEGER PK | Auto-increment |
-| `condition_id` | TEXT UNIQUE | FK to sports_markets |
-| `odds_event_id` | TEXT | FK to odds_snapshots |
-| `poly_team_a_is_home` | INTEGER | 1 if poly team_a is the home team |
-| `match_score` | REAL | Fuzzy match confidence [0, 1] |
+| Column                | Type        | Description                       |
+| --------------------- | ----------- | --------------------------------- |
+| `id`                  | INTEGER PK  | Auto-increment                    |
+| `condition_id`        | TEXT UNIQUE | FK to sports_markets              |
+| `odds_event_id`       | TEXT        | FK to odds_snapshots              |
+| `poly_team_a_is_home` | INTEGER     | 1 if poly team_a is the home team |
+| `match_score`         | REAL        | Fuzzy match confidence [0, 1]     |
 
 ### credits_log
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | INTEGER PK | Auto-increment |
-| `timestamp` | INTEGER | When the API call was made |
-| `sport` | TEXT | Sport name |
-| `sport_key` | TEXT | Odds API sport key |
-| `date_str` | TEXT | Date queried |
-| `credits_used` | INTEGER | Credits consumed |
-| | | UNIQUE(sport_key, date_str) |
+| Column         | Type       | Description                 |
+| -------------- | ---------- | --------------------------- |
+| `id`           | INTEGER PK | Auto-increment              |
+| `timestamp`    | INTEGER    | When the API call was made  |
+| `sport`        | TEXT       | Sport name                  |
+| `sport_key`    | TEXT       | Odds API sport key          |
+| `date_str`     | TEXT       | Date queried                |
+| `credits_used` | INTEGER    | Credits consumed            |
+|                |            | UNIQUE(sport_key, date_str) |
 
 ---
 
@@ -225,16 +229,16 @@ File: `sports_data.db` (SQLite)
 
 All charts are generated in `sports/charts/`:
 
-| Chart | File | Description |
-|-------|------|-------------|
-| Data Volume | `rows_per_sport.png` | Horizontal bar chart of rows per sport |
-| Event Count | `events_per_sport.png` | Vertical bar chart of unique events per sport |
-| Price vs Odds | `poly_vs_odds_scatter.png` | Hexbin scatter of Polymarket price vs bookmaker implied probability |
-| Edge Distribution | `edge_distribution.png` | Histogram of (poly_price - odds) with mean/median |
-| Coverage | `coverage_over_time.png` | Monthly unique events per sport |
-| Trajectories | `event_trajectories.png` | Example event: poly_price + odds over time (one per sport) |
-| Calibration | `calibration_curve.png` | Binned odds vs mean poly_price with 45 degree reference |
-| Summary | `data_summary.png` | Per-sport statistics table |
+| Chart             | File                       | Description                                                         |
+| ----------------- | -------------------------- | ------------------------------------------------------------------- |
+| Data Volume       | `rows_per_sport.png`       | Horizontal bar chart of rows per sport                              |
+| Event Count       | `events_per_sport.png`     | Vertical bar chart of unique events per sport                       |
+| Price vs Odds     | `poly_vs_odds_scatter.png` | Hexbin scatter of Polymarket price vs bookmaker implied probability |
+| Edge Distribution | `edge_distribution.png`    | Histogram of (poly_price - odds) with mean/median                   |
+| Coverage          | `coverage_over_time.png`   | Monthly unique events per sport                                     |
+| Trajectories      | `event_trajectories.png`   | Example event: poly_price + odds over time (one per sport)          |
+| Calibration       | `calibration_curve.png`    | Binned odds vs mean poly_price with 45 degree reference             |
+| Summary           | `data_summary.png`         | Per-sport statistics table                                          |
 
 ### Data Volume per Sport
 
