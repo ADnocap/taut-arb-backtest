@@ -5,7 +5,7 @@
 
 ## Overview
 
-Polymarket lists thousands of prediction markets on crypto price events ("Will BTC be above $100k on Jan 1?"). Each market trades at a price between 0 and 1 that reflects the crowd's implied probability. This system independently prices those same events using options, futures, and funding rate data from Deribit, then identifies mispricings and simulates trading them.
+Polymarket lists thousands of prediction markets on crypto price events ("Will BTC be above $100k on Jan 1?"). Each market trades at a price between 0 and 1 that reflects the crowd's implied probability. This repository is the data side of that work: collectors and sample databases for pricing those same events independently from Deribit options, futures and funding-rate data. The pricing and trading code that used it is not part of this repository.
 
 **Assets:** BTC, ETH, SOL, XRP
 **Coverage:** April 2025 – February 2026
@@ -15,7 +15,7 @@ Polymarket lists thousands of prediction markets on crypto price events ("Will B
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  1. COLLECTION         Async collectors (6 APIs, no auth)   │
+│  1. COLLECTION         Async collectors (5 APIs, no auth)   │
 │     Polymarket CLOB ─── market discovery + price history    │
 │     Polymarket Gamma ── active markets                      │
 │     Goldsky GraphQL ─── price backfill for gaps             │
@@ -31,9 +31,6 @@ Polymarket lists thousands of prediction markets on crypto price events ("Will B
 │                        Funding rate drift estimation         │
 │                        DVOL computation (Carr-Madan)         │
 │                        Volatility-of-volatility (VoV)        │
-├─────────────────────────────────────────────────────────────┤
-│  4. BACKTEST           Model probability vs market price    │
-│                        Edge calculation + PnL simulation    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
